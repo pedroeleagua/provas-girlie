@@ -1,8 +1,9 @@
 // Copia as bibliotecas do node_modules para vendor/ (o site não usa bundler).
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..");
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const copies = [
 	["node_modules/mupdf/dist/mupdf.js", "vendor/mupdf/mupdf.js"],
 	["node_modules/mupdf/dist/mupdf-wasm.js", "vendor/mupdf/mupdf-wasm.js"],

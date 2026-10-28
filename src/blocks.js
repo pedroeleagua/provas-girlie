@@ -17,17 +17,41 @@ export function cmpItems(a, b) {
 }
 
 const ENDS_SENTENCE = [".", ":", "?", "!", ";"];
+// marcador sozinho na linha ("II." à esquerda e o texto noutra coluna, como no Word)
+const _ENUM_ALONE = /^\(?([IVX]{1,5}|\p{Nd}{1,2}|[a-z])[.)\-–]$/u;
 
-function _starts_new_paragraph(prev, cur) {
+function _starts_new_paragraph(prev, cur, first_line = false, right = null) {
 	if (cur.page !== prev.page) return ENDS_SENTENCE.some((e) => rstrip(prev.text).endsWith(e));
 	const dy = cur.y0 - prev.y0;
 	if (Math.abs(dy) <= 2.0) return false;
-	if (dy > Math.max(prev.size, cur.size) * 1.75) return true;
+	if (dy > Math.max(prev.size, cur.size) * 1.75) return options.compat || !_wide_spaced_continuation(prev, cur, dy, right);
 	// título grande seguido de texto (ex.: "M2 - Avaliação de Anatomia" e a questão 1)
 	if (!options.compat && Math.max(prev.size, cur.size) > 1.3 * Math.min(prev.size, cur.size)) return true;
-	if (cur.x0 > prev.x0 + 8) return true;
-	if (_ENUM_START.test(cur.text.trim()) && ENDS_SENTENCE.some((e) => rstrip(prev.text).endsWith(e))) return true;
+	if (cur.x0 > prev.x0 + 8) return options.compat || !(first_line && _hanging_continuation(prev, cur));
+	const t = cur.text.trim();
+	if ((_ENUM_START.test(t) || (!options.compat && _ENUM_ALONE.test(t))) && ENDS_SENTENCE.some((e) => rstrip(prev.text).endsWith(e))) return true;
 	return false;
+}
+
+// Texto colado com entrelinha grande (1,5–2): a linha cheia que não fecha a frase
+// continua na de baixo ("… importantes no" / "recém-nato, observado …").
+function _wide_spaced_continuation(prev, cur, dy, right) {
+	const size = Math.max(prev.size, cur.size);
+	if (right === null || dy > 2.6 * size || Math.abs(cur.x0 - prev.x0) > 2 || prev.x1 < right - 4 * size) return false;
+	const p = rstrip(prev.text);
+	const t = cur.text.trim();
+	if (!p || ENDS_SENTENCE.some((e) => p.endsWith(e)) || _ENUM_START.test(t) || _ENUM_ALONE.test(t)) return false;
+	return /^[(["“'«]?\p{Ll}/u.test(t) || /[-,(/=]$/u.test(p);
+}
+
+// Recuo deslocado: "I.  Do ponto de vista … relacionadas com" e a linha seguinte
+// ("a sensibilidade …") começa mais à direita, alinhada ao texto e não ao marcador.
+function _hanging_continuation(prev, cur) {
+	if (cur.x0 - prev.x0 > 4.5 * Math.max(prev.size, cur.size)) return false;
+	const p = rstrip(prev.text);
+	const t = cur.text.trim();
+	if (!p || ENDS_SENTENCE.some((e) => p.endsWith(e)) || _ENUM_START.test(t) || _ENUM_ALONE.test(t)) return false;
+	return /^[(["“'«]?\p{Ll}/u.test(t) || /[-,(/=]$/u.test(p);
 }
 
 function _line_runs(line) {
@@ -63,6 +87,10 @@ export class BlockBuilder {
 			cur_lines = [];
 		};
 
+		// margem direita do texto em cada página (para saber se uma linha está cheia)
+		const right = new Map();
+		if (!options.compat) for (const it of items) if (!(it instanceof PageImage)) right.set(it.page, Math.max(right.get(it.page) ?? 0, it.x1));
+
 		for (const it of [...items].sort(cmpItems)) {
 			if (prev_item !== null && it.page === prev_item.page && it.y0 - prev_item.y1 > GAP_PT) {
 				flush();
@@ -78,7 +106,7 @@ export class BlockBuilder {
 				prev_item = it;
 				continue;
 			}
-			if (cur_lines.length && _starts_new_paragraph(cur_lines[cur_lines.length - 1], it)) flush();
+			if (cur_lines.length && _starts_new_paragraph(cur_lines[cur_lines.length - 1], it, cur_lines.length === 1, right.get(it.page) ?? null)) flush();
 			if (cur_runs.length) {
 				const last = cur_runs[cur_runs.length - 1].text;
 				if (!(last.endsWith("-") && !last.endsWith(" -")) && !last.endsWith(" ")) cur_runs.push(new Run(" "));

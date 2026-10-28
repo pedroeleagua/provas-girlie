@@ -29,7 +29,9 @@ Antes de salvar a revisão em PDF, role a página inteira até o fim e espere as
 aparecerem. Se alguma figura não vier, o caderno mostra uma caixa “Atenção” no lugar dela.
 
 Funciona com PDFs salvos pelo Safari (iPad/iPhone), Chrome e Edge. Um PDF montado
-juntando várias revisões vira uma prova por parte.
+juntando várias revisões vira uma prova por parte. Além das alternativas “a.”, entende
+questões de Verdadeiro/Falso, alternativas numeradas ou sem letra, várias respostas
+corretas e o Moodle em inglês. Se o PDF estiver danificado, o app avisa para conferir.
 
 Também aceita a **prova feita no Word** (PDF ou .docx) com as questões numeradas
 “1)”, alternativas “a)” e um **Gabarito** no fim (“1 – D”): as questões são separadas e a

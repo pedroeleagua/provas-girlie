@@ -86,7 +86,7 @@ export class Mark {
 
 export class PageContent {
 	constructor(number, width, height) {
-		Object.assign(this, { number, width, height, lines: [], images: [], icons: [], marks: [] });
+		Object.assign(this, { number, width, height, lines: [], images: [], icons: [], marks: [], radios: [] });
 	}
 }
 
@@ -103,7 +103,19 @@ export class PdfContent {
 	}
 }
 
+// "%PDF-" no primeiro KB (a especificação permite lixo antes)
+function _looks_like_pdf(data) {
+	const head = data.subarray(0, 1024);
+	for (let i = 0; i + 4 < head.length; i++) {
+		if (head[i] === 0x25 && head[i + 1] === 0x50 && head[i + 2] === 0x44 && head[i + 3] === 0x46 && head[i + 4] === 0x2d) return true;
+	}
+	return false;
+}
+
 export function open_pdf(data) {
+	if (!options.compat && !_looks_like_pdf(data)) {
+		throw new PdfError("este arquivo não é um PDF de verdade (pode ser uma página da web ou outro arquivo com o nome trocado). Abra a revisão no navegador, use Imprimir › Salvar como PDF e tente de novo.");
+	}
 	let doc;
 	try {
 		doc = mupdf.Document.openDocument(data, "application/pdf");
@@ -358,6 +370,48 @@ function _merge_split_headers(lines, page_no) {
 	return changed ? out.filter((ln) => !removed.has(ln)) : lines;
 }
 
+// PDFs do Edge/PDFium partem uma linha em pedaços com alturas que diferem décimos de
+// ponto ("Lesão do" / " núcleo ventromedial " / "(associado à"…); ordenados por altura,
+// eles se embaralham. Junta pedaços encostados na mesma linha visual. A letra da
+// alternativa ("a.") fica sempre separada: o leitor do Moodle precisa dela sozinha.
+const LONE_LABEL_RE = /^\(?[a-zA-Z][.)]$/u;
+function _merge_line_fragments(lines, page_no) {
+	if (lines.length < 2) return lines;
+	const lone = (ln) => LONE_LABEL_RE.test(strip(ln.text));
+	const follows = (a, b) => {
+		const size = Math.max(a.size, b.size);
+		if (Math.abs(a.size - b.size) > 0.25 * size) return false;
+		const gap = b.x0 - a.x1;
+		if (gap < -0.5 * size || gap > 0.45 * size || b.x0 < a.x0 + 0.5 * size) return false;
+		const h = Math.min(a.y1 - a.y0, b.y1 - b.y0);
+		return Math.abs(a.y0 - b.y0) <= 0.3 * size && Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0) >= 0.6 * h;
+	};
+	const removed = new Set();
+	const merged = new Map();
+	// da esquerda para a direita: o primeiro pedaço da linha sempre é o que absorve os outros
+	for (const start of [...lines].sort((a, b) => a.x0 - b.x0)) {
+		if (removed.has(start)) continue;
+		let ln = start;
+		while (!lone(ln)) {
+			let next = null;
+			for (const o of lines) {
+				if (o === start || removed.has(o) || lone(o) || !follows(ln, o)) continue;
+				if (next === null || o.x0 < next.x0) next = o;
+			}
+			if (next === null) break;
+			removed.add(next);
+			const spans = [...ln.spans];
+			if (next.x0 - ln.x1 > 0.15 * next.size && !/\s$/u.test(ln.text) && !/^\s/u.test(next.text)) {
+				const s = spans[spans.length - 1];
+				spans.push(new Span(" ", s.bold, s.italic, s.size, s.color, s.x1, next.x0, s.origin_y, [[" ", s.x1, next.x0]]));
+			}
+			ln = new Line(page_no, ln.x0, Math.min(ln.y0, next.y0), Math.max(ln.x1, next.x1), Math.max(ln.y1, next.y1), [...spans, ...next.spans]);
+		}
+		if (ln !== start) merged.set(start, ln);
+	}
+	return removed.size ? lines.filter((ln) => !removed.has(ln)).map((ln) => merged.get(ln) || ln) : lines;
+}
+
 // "Questão N", "Correto", "Atingiu…" no topo da página não são cabeçalho do navegador,
 // mesmo repetidos em todas as páginas.
 const QUIZ_LINE_RE = /^(?:(?:Questão|Questao|Question|Pergunta)\s+\p{Nd}+|Correto|Incorreto|Parcialmente correto|Correct|Incorrect|Partially correct|Não respondid[ao]|Atingiu\s.+|Vale\s.+|Mark\s.+)\.?$/iu;
@@ -444,7 +498,39 @@ function scanPage(page) {
 	return { drawings, placements };
 }
 
+// Todas as bolinhas/quadradinhos de resposta (marcados ou não): servem para achar as
+// alternativas quando a questão não tem letra (Verdadeiro/Falso, "1.", sem numeração).
+function _extract_radios(drawings, page_no) {
+	const radios = [];
+	for (const cl of _mark_clusters(drawings)) {
+		const x0 = Math.min(...cl.map((d) => d.rect[0])), y0 = Math.min(...cl.map((d) => d.rect[1]));
+		const x1 = Math.max(...cl.map((d) => d.rect[2])), y1 = Math.max(...cl.map((d) => d.rect[3]));
+		const w = x1 - x0, h = y1 - y0;
+		if (w >= 5 && w <= 16 && h >= 5 && h <= 16 && Math.abs(w - h) <= 2.5) radios.push(new Mark(page_no, (x0 + x1) / 2, (y0 + y1) / 2));
+	}
+	return radios;
+}
+
 function _extract_marks(drawings, page_no) {
+	const clusters = _mark_clusters(drawings);
+	const marks = [];
+	for (const cl of clusters) {
+		if (cl.length < 2) continue;
+		const wmax = Math.max(...cl.map((d) => d.rect[2] - d.rect[0]));
+		for (const d of cl) {
+			const fill = d.fill;
+			if (fill === null || d.rect[2] - d.rect[0] > 0.75 * wmax) continue;
+			if ((fill[0] + fill[1] + fill[2]) / 3 < 0.85) {
+				const r = d.rect;
+				marks.push(new Mark(page_no, (r[0] + r[2]) / 2, (r[1] + r[3]) / 2));
+				break;
+			}
+		}
+	}
+	return marks;
+}
+
+function _mark_clusters(drawings) {
 	const small = [];
 	for (const d of drawings) {
 		const r = d.rect;
@@ -468,21 +554,7 @@ function _extract_marks(drawings, page_no) {
 		}
 		if (!placed) clusters.push([d]);
 	}
-	const marks = [];
-	for (const cl of clusters) {
-		if (cl.length < 2) continue;
-		const wmax = Math.max(...cl.map((d) => d.rect[2] - d.rect[0]));
-		for (const d of cl) {
-			const fill = d.fill;
-			if (fill === null || d.rect[2] - d.rect[0] > 0.75 * wmax) continue;
-			if ((fill[0] + fill[1] + fill[2]) / 3 < 0.85) {
-				const r = d.rect;
-				marks.push(new Mark(page_no, (r[0] + r[2]) / 2, (r[1] + r[3]) / 2));
-				break;
-			}
-		}
-	}
-	return marks;
+	return clusters;
 }
 
 // Imagens (XObject) alcançáveis a partir dos recursos da página, com o xref.
@@ -724,7 +796,7 @@ export async function read_pdf(data, path, onPage = null) {
 		const pc = new PageContent(i, b[2] - b[0], b[3] - b[1]);
 		const [lines, icons] = _extract_lines(page, i, pageRect);
 		pc.lines = _merge_script_fragments(lines);
-		if (!options.compat) pc.lines = _merge_split_headers(pc.lines, i);
+		if (!options.compat) pc.lines = _merge_line_fragments(_merge_split_headers(pc.lines, i), i);
 		pc.icons = icons;
 		let scan = { drawings: [], placements: [] };
 		try {
@@ -736,6 +808,7 @@ export async function read_pdf(data, path, onPage = null) {
 			pc.images = [];
 		}
 		pc.marks = _extract_marks(scan.drawings, i);
+		if (!options.compat) pc.radios = _extract_radios(scan.drawings, i);
 		if (!options.compat) pc.fonts = pageFontXrefs(page);
 		pages.push(pc);
 	}

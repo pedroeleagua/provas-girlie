@@ -2,13 +2,14 @@
 // Uso: node tests/inspect.mjs saida.docx arquivo1.pdf [arquivo2.pdf ...]
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import * as mupdf from "mupdf";
 import JSZip from "jszip";
 import { DOMParser } from "@xmldom/xmldom";
 import { init } from "../src/env.js";
 import { generate } from "../src/pipeline.js";
 
-const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..");
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 init({ mupdf, JSZip, DOMParser });
 const [out, ...inputs] = process.argv.slice(2);
 const files = inputs.map((f) => ({ name: path.basename(f), data: new Uint8Array(fs.readFileSync(f)) }));

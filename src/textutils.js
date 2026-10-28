@@ -1,5 +1,6 @@
 // Funções de texto: normalização, comparação de respostas, temas e títulos.
 import { Run } from "./models.js";
+import { options } from "./options.js";
 import { BE as B, BS, D, strip, rstrip, lstrip, title as pyTitle, seqRatio } from "./py.js";
 
 const _WS = /[ \t\xa0 -​  　]+/gu;
@@ -72,6 +73,8 @@ export function match_answer(answer, options, plural = false) {
 const _COUNT_ANSWER = new RegExp(`^(apenas${B}|somente${B}|todas?${B}|nenhuma${B}|${D}+\\s+afirmativ|i{1,3}v?${B}|iv${B}|v${B}|verdadeir|fals|\\(?[ivx]+[,)\\s])`, "iu");
 const _GENERIC_START = new RegExp(`^(qual|quais|assinale|marque|analise|avalie|observe|considere|sobre|com o conhecimento|com base|de acordo|segundo|leia|identifique)${B}`, "iu");
 
+const _GENERIC_TAIL = /^(pode-se afirmar|podemos afirmar|é correto afirmar|est(á|ão) corret[ao]s?|escolha uma|selecione|select one|responda)\b[^.?!]{0,40}[:?]?$/iu;
+
 function _first_sentence(text, limit = 70) {
 	text = strip(collapse_ws(text));
 	const m = /(.+?[.?!:])(\s|$)/u.exec(text);
@@ -100,6 +103,8 @@ export function guess_topic(stem_paragraphs, answer_text) {
 	const paras = stem_paragraphs.filter((p) => strip(p.text)).map((p) => strip(collapse_ws(p.text)));
 	for (const p of paras) {
 		if (_GENERIC_START.test(p) || /^[IVX]+[.)]/.test(p)) continue;
+		// "Pode-se afirmar que:", "Escolha uma opção:" não dizem o assunto
+		if (!options.compat && _GENERIC_TAIL.test(p)) continue;
 		return _first_sentence(p);
 	}
 	if (paras.length) return _first_sentence(paras[0]);

@@ -2,6 +2,7 @@
 // do ProvasGirlie.exe original (testdata/golden). Uso: node tests/run.mjs [caso]
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import * as mupdf from "mupdf";
 import JSZip from "jszip";
 import { DOMParser } from "@xmldom/xmldom";
@@ -9,7 +10,7 @@ import { init } from "../src/env.js";
 import { options } from "../src/options.js";
 import { generate } from "../src/pipeline.js";
 
-const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
 const data = path.resolve(root, "..", "testdata");
 

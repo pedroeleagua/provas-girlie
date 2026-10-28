@@ -72,12 +72,21 @@ function fmtSize(n) {
 	return `${(n / 1024 / 1024).toFixed(1).replace(".", ",")} MB`;
 }
 
+// "1 questão", "2 questões"
+function plural(n, one, many) {
+	return `${n} ${n === 1 ? one : many}`;
+}
+
 function extOf(name) {
 	const i = name.lastIndexOf(".");
 	return i < 0 ? "" : name.slice(i).toLowerCase();
 }
 
 function addFiles(list) {
+	if (busy) {
+		showStatus("Espere o caderno ficar pronto para mexer na lista. ♡");
+		return;
+	}
 	const incoming = [...list].sort((a, b) => compareNatural(a.name, b.name));
 	const rejected = [];
 	let added = 0;
@@ -214,7 +223,17 @@ async function start() {
 		showStatus("Preparando o leitor de PDF…");
 		const deps = await loadDeps();
 		const inputs = [];
-		for (const f of files) inputs.push({ name: f.name, data: new Uint8Array(await f.file.arrayBuffer()) });
+		for (const f of files) {
+			let data;
+			try {
+				data = new Uint8Array(await f.file.arrayBuffer());
+			} catch {
+				// no iPad: arquivo que ainda está só no iCloud, ou que foi apagado/movido depois de escolhido
+				throw new UserError(`Não consegui abrir “${f.name}”. Se ele está no iCloud, abra-o uma vez no app Arquivos (para baixar) e adicione de novo.`);
+			}
+			if (!data.length) throw new UserError(`“${f.name}” está vazio (0 bytes). Salve o PDF de novo e tente outra vez.`);
+			inputs.push({ name: f.name, data });
+		}
 		const res = await generate(inputs, {
 			header,
 			title: $("in-title").value.trim(),
@@ -244,10 +263,13 @@ function finish(res) {
 	dl.href = lastUrl;
 	dl.download = name;
 	const nq = res.exams.reduce((a, e) => a + e.questions.length, 0);
-	for (const e of res.exams) log(`✓ ${e.title}: ${e.questions.length} questões (${{ moodle: "revisão do Moodle", prova: "prova com gabarito" }[e.kind] || "conteúdo corrido"})`, "ok");
+	for (const e of res.exams) {
+		const kind = { moodle: "revisão do Moodle", prova: "prova com gabarito" }[e.kind];
+		log(kind ? `✓ ${e.title}: ${plural(e.questions.length, "questão", "questões")} (${kind})` : `✓ ${e.title}: entrou como texto corrido`, "ok");
+	}
 	for (const w of res.warnings) log(`⚠ ${w}`, "warn");
 	setProgress(1);
-	showStatus(`Pronto! ${res.exams.length} prova(s), ${nq} questões → ${name}`, "ok");
+	showStatus(`Pronto! ${plural(res.exams.length, "prova", "provas")}, ${plural(nq, "questão", "questões")} → ${name}`, "ok");
 	$("result-info").textContent = `${name} · ${fmtSize(res.data.length)}`;
 	$("btn-share").hidden = !canShareFile(name);
 	$("share-tip").hidden = $("btn-share").hidden;
@@ -309,6 +331,7 @@ function wire() {
 		e.target.value = "";
 	});
 	$("btn-clear").addEventListener("click", () => {
+		if (busy) return;
 		files.length = 0;
 		clearResult();
 		render();

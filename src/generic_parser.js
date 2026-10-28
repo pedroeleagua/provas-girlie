@@ -94,7 +94,7 @@ export async function parse_docx(data, path) {
 		}
 		if (!root.documentElement || root.documentElement.localName !== "document") throw new Error("documento inválido");
 	} catch (exc) {
-		throw new Error(`Não consegui abrir o arquivo Word (${exc?.message || exc}).`);
+		throw new Error("não consegui abrir este arquivo Word. Confira se ele é mesmo .docx (o formato antigo .doc não funciona) e, se for, salve-o de novo no Word.");
 	}
 
 	const contentType = (partName) => {

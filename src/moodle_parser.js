@@ -19,6 +19,9 @@ const NAV_JUNK_RE = new RegExp(`^(Terminar revisão|Finish review|Navegação do
 const LABEL_RE = /^([a-zA-Z])[.)]$/u;
 const LABEL_INLINE_RE = /^([a-zA-Z])[.)]\s+\S/u;
 const RIGHT_RE = /^(A resposta correta é|A resposta correta foi|As respostas corretas são|The correct answer is|The correct answers are)\s*:?\s*/iu;
+const RIGHT_INLINE_RE = /([.!?]\s+)(?:A resposta correta é|A resposta correta foi|As respostas corretas são|The correct answer is|The correct answers are)\s*:/u;
+// instrução do Moodle acima das alternativas (alguns temas mostram, outros não)
+const PROMPT_RE = /^(Escolha uma opção|Escolha uma ou mais|Escolha uma|Selecione uma opção|Selecione uma ou mais|Select one|Select one or more)\s*:?$/iu;
 const OUTCOME_RE = /^(Sua resposta está (correta|incorreta|parcialmente correta)|Your answer is)/iu;
 // "fig." termina em ponto: no Python o \b depois dele exige uma letra/dígito em seguida.
 const FIGURE_RE = new RegExp(`${BS}(?:(?:setas?|esquemas?|figuras?|imagens?|ilustra${W}*|observe|marcad[ao]s?|apontad[ao]s?|indicad[ao]s?|destacad[ao]s?|fotografia|foto|radiografia|tomografia|corte)${BE}|fig\\.(?=${W}))`, "iu");
@@ -247,7 +250,8 @@ function _strip_inline_label(ln, dedupe = false) {
 	if (!spans[0].text) spans.shift();
 	if (dedupe && m && spans.length) {
 		// a professora também escreveu uma letra no texto ("b. a) …"): fica só a do Moodle
-		const again = /^\s*[a-eA-E][.)]\s+/u.exec(spans[0].text);
+		// o "a)" pode vir num trecho só dele, com os espaços no trecho seguinte
+		const again = /^\s*[a-eA-E](?:[.)]\s+|\)$)/u.exec(spans[0].text);
 		if (again) {
 			spans[0].text = spans[0].text.slice(again[0].length);
 			if (!spans[0].text) spans.shift();
@@ -256,12 +260,110 @@ function _strip_inline_label(ln, dedupe = false) {
 	return new Line(ln.page, ln.x0 + 1, ln.y0, ln.x1, ln.y1, spans);
 }
 
+// "Mark 1.00 out of" / "1.00": na caixa estreita ao lado da questão a nota quebra a linha.
+const GRADE_START_RE = /^(Atingiu|Mark|Marked out of|Vale|Pontuação)\s/iu;
+function _join_wrapped_grades(lines) {
+	const drop = new Set();
+	const out = lines.map((ln) => {
+		const t = strip(ln.text);
+		if (drop.has(ln) || !GRADE_START_RE.test(t) || GRADE_RE.test(t)) return ln;
+		const nxt = lines.find((o) => o !== ln && !drop.has(o) && o.page === ln.page && Math.abs(o.x0 - ln.x0) < 3 && o.y0 > ln.y0 + 1 && o.y0 - ln.y1 < ln.size);
+		if (!nxt || !GRADE_RE.test(`${t} ${strip(nxt.text)}`)) return ln;
+		drop.add(nxt);
+		const s = ln.spans[ln.spans.length - 1];
+		const sp = new Span(" ", s.bold, s.italic, s.size, s.color, s.x1, s.x1, s.origin_y, [[" ", s.x1, s.x1]]);
+		return new Line(ln.page, ln.x0, ln.y0, Math.max(ln.x1, nxt.x1), nxt.y1, [...ln.spans, sp, ...nxt.spans]);
+	});
+	return drop.size ? out.filter((ln) => !drop.has(ln)) : lines;
+}
+
+// Questão sem letras (Verdadeiro/Falso, "1.", sem numeração): cada bolinha da coluna de
+// respostas vira uma alternativa, com a letra criada aqui.
+function _radio_labels(body, radios) {
+	const rows = [];
+	for (const r of radios) {
+		const line = body.find((ln) => ln.page === r.page && ln.x0 > r.cx && ln.x0 - r.cx < 40 && ln.y0 - 3 < r.cy && r.cy < ln.y1 + 3);
+		if (line) rows.push([r, line]);
+	}
+	if (rows.length < 2) return [];
+	const xs = rows.map(([r]) => r.cx).sort((a, b) => a - b);
+	const x = xs[Math.floor(xs.length / 2)];
+	const col = rows.filter(([r]) => Math.abs(r.cx - x) < 3).sort(([a], [b]) => cmpTuple([a.page, a.cy], [b.page, b.cy]));
+	if (col.length < 2 || col.length > 12) return [];
+	return col.map(([r, line], k) => {
+		const s = line.spans[0];
+		const x0 = r.cx + 5;
+		return new Line(r.page, x0, r.cy - 4, x0 + 1, r.cy + 4, [new Span(`${String.fromCharCode(97 + k)}.`, false, false, s.size, s.color, x0, x0 + 1, s.origin_y, [])]);
+	});
+}
+
+// Com letras criadas a partir das bolinhas, tira a numeração própria ("1.", "A.", "i.")
+// do começo das alternativas — só quando ela segue a sequência em todas.
+const OWN_NUMBER_RE = /^\s*\(?(\p{Nd}{1,2}|[ivx]{1,4}|[IVX]{1,4}|[a-zA-Z])[.)]\s+(?=\S)/u;
+const ROMAN = ["i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x", "xi", "xii"];
+function _strip_own_numbering(opts) {
+	const firsts = opts.map((o) => o.blocks.find((b) => b instanceof Paragraph && strip(b.text)) || null);
+	const tokens = firsts.map((p) => (p ? OWN_NUMBER_RE.exec(p.text) : null));
+	if (tokens.some((m) => !m)) return;
+	const got = tokens.map((m) => m[1]);
+	const seqs = [
+		got.map((_, k) => String(k + 1)),
+		got.map((_, k) => String.fromCharCode(97 + k)),
+		got.map((_, k) => String.fromCharCode(65 + k)),
+		got.map((_, k) => ROMAN[k]),
+		got.map((_, k) => (ROMAN[k] || "").toUpperCase()),
+	];
+	if (!seqs.some((s) => s.join(",") === got.join(","))) return;
+	firsts.forEach((p, k) => {
+		const [, tail] = _split_runs(p.runs, tokens[k][0].length);
+		p.runs = tail;
+	});
+}
+
+// Corta a lista de trechos na posição `at` do texto (para separar duas frases).
+function _split_runs(runs, at) {
+	const head = [], tail = [];
+	let pos = 0;
+	for (const r of runs) {
+		const end = pos + r.text.length;
+		if (end <= at) head.push(r);
+		else if (pos >= at) tail.push(r);
+		else {
+			head.push(new Run(r.text.slice(0, at - pos), r.bold, r.italic, r.sub, r.sup));
+			tail.push(new Run(r.text.slice(at - pos), r.bold, r.italic, r.sub, r.sup));
+		}
+		pos = end;
+	}
+	if (tail.length) tail[0] = new Run(tail[0].text.replace(/^\s+/u, ""), tail[0].bold, tail[0].italic, tail[0].sub, tail[0].sup);
+	return [head, tail.filter((r) => r.text)];
+}
+
+// Onde começa cada alternativa, quando a letra não está alinhada à 1ª linha do texto.
+const ROW_TOP = new WeakMap();
+
 function _row_index(labels, it, tol = 1.5) {
 	let idx = 0;
 	labels.forEach((lab, k) => {
-		if (keyLE([lab.page, lab.y0 - tol], [it.page, it.y0])) idx = k;
+		const top = ROW_TOP.has(lab) ? ROW_TOP.get(lab) : lab.y0 - tol;
+		if (keyLE([lab.page, top], [it.page, it.y0])) idx = k;
 	});
 	return idx;
+}
+
+// No Edge/PDFium a letra pode ficar até meia linha abaixo da 1ª linha da alternativa:
+// a alternativa começa na linha mais alta, à direita da letra, que encosta nela.
+function _set_row_tops(labels, body, tol) {
+	const label_ids = new Set(labels);
+	labels.forEach((lab, k) => {
+		let top = lab.y0 - tol;
+		const above = k ? labels[k - 1] : null;
+		for (const ln of body) {
+			if (label_ids.has(ln) || ln.page !== lab.page || ln.x0 < lab.x1 - 1 || ln.y0 >= top) continue;
+			if (above && above.page === lab.page && ln.y0 <= above.y1) continue;
+			if (Math.min(ln.y1, lab.y1) - Math.max(ln.y0, lab.y0) > 0.3 * (lab.y1 - lab.y0)) top = ln.y0;
+		}
+		ROW_TOP.set(lab, top);
+	});
 }
 
 class _QuestionParser {
@@ -271,11 +373,12 @@ class _QuestionParser {
 		this.fb_colors = fb_colors;
 	}
 
-	parse(header, lines, imgs, icons, marks, left_limit, is_last) {
+	parse(header, lines, imgs, icons, marks, left_limit, is_last, radios = []) {
 		const q = new Question(QUESTION_RE.exec(strip(header.text))[1]);
 		const body = [];
 		// "Questão N" no pé da página: o "Correto / Atingiu…" foi para o topo da seguinte.
 		const spill = options.compat ? null : _spills_to_next_page(header, lines);
+		if (!options.compat) lines = _join_wrapped_grades(lines);
 		for (const ln of lines) {
 			const t = strip(ln.text);
 			const near_header = (ln.page === header.page && -2 <= ln.y0 - header.y1 && ln.y0 - header.y1 < 60) ||
@@ -289,7 +392,7 @@ class _QuestionParser {
 				q.grade = q.grade || t;
 				continue;
 			}
-			if (INFO_JUNK_RE.test(t)) continue;
+			if (INFO_JUNK_RE.test(t) || (!options.compat && PROMPT_RE.test(t))) continue;
 			if (is_last && NAV_JUNK_RE.test(t)) break;
 			body.push(ln);
 		}
@@ -298,7 +401,9 @@ class _QuestionParser {
 			const limit = nav ? item_key(nav) : null;
 			if (limit) imgs = imgs.filter((im) => keyLT(item_key(im), limit));
 		}
-		const [labels, inline_text, relaxed] = _find_labels(body);
+		let [labels, inline_text, relaxed] = _find_labels(body);
+		const synthetic = !labels.length && !options.compat && radios.length >= 2;
+		if (synthetic) labels = _radio_labels(body, radios);
 		let stem_items, fb_items;
 		// Em PDFs do Safari/PDFium o texto da alternativa fica alguns pontos acima da
 		// letra: a tolerância acompanha a altura da letra (o original usa 1,5 pt fixo).
@@ -306,9 +411,11 @@ class _QuestionParser {
 		if (!options.compat && labels.length) {
 			const hs = labels.map((l) => l.y1 - l.y0).sort((a, b) => a - b);
 			tol = Math.max(relaxed ? 3.0 : 1.5, 0.45 * hs[Math.floor(hs.length / 2)]);
+			_set_row_tops(labels, body, tol);
 		}
 		if (labels.length) [stem_items, fb_items] = this._split_with_options(q, body, imgs, icons, marks, labels, inline_text, tol);
 		else [stem_items, fb_items] = this._split_without_options(body, imgs);
+		if (synthetic && labels.length) _strip_own_numbering(q.options);
 		let gaps;
 		[q.stem, gaps] = this.builder.build(stem_items);
 		if (labels.length && stem_items.length) {
@@ -350,7 +457,8 @@ class _QuestionParser {
 		}
 		const in_options = (it) => {
 			const k = item_key(it);
-			return keyLE([first.page, first.y0], [it.page, it.y0 + tol]) && (fb_start === null || keyLT(k, fb_start));
+			const top = ROW_TOP.has(first) ? keyLE([first.page, ROW_TOP.get(first)], [it.page, it.y0]) : keyLE([first.page, first.y0], [it.page, it.y0 + tol]);
+			return top && (fb_start === null || keyLT(k, fb_start));
 		};
 		const toFeedback = (it) => fb_start !== null && !keyLT(item_key(it), fb_start);
 		const opts = labels.map((lab) => new Option(strip(lab.text)[0].toLowerCase()));
@@ -359,7 +467,9 @@ class _QuestionParser {
 		const stem_items = [];
 		const fb_items = [];
 		const opt_icons = labels.map(() => []);
-		for (const ic of icons) if (in_options(ic)) opt_icons[_row_index(labels, ic, tol)].push(ic);
+		// o ✓/✗ fica à direita da alternativa; à esquerda das letras só há a bandeirinha
+		// "Marcar questão" da caixa lateral (layout do Moodle em tela larga)
+		for (const ic of icons) if (in_options(ic) && (options.compat || ic.x1 > label_x - 2)) opt_icons[_row_index(labels, ic, tol)].push(ic);
 		for (const ln of body) {
 			if (label_ids.has(ln)) {
 				if (inline_text.has(ln)) opt_items[labels.indexOf(ln)].push(inline_text.get(ln));
@@ -384,6 +494,8 @@ class _QuestionParser {
 		opts.forEach((opt, k) => {
 			[opt.blocks] = this.builder.build(opt_items[k]);
 			[opt.feedback] = this.builder.build(side_items[k]);
+			// comentário que é só uma letra ("a)") não diz nada: a professora deixou o campo assim
+			if (!options.compat && opt.feedback.length === 1 && /^\(?[a-eA-E][.)]?$/u.test(strip(opt.feedback[0].text || ""))) opt.feedback = [];
 			const lab = labels[k];
 			const cy = (lab.y0 + lab.y1) / 2;
 			for (const mk of marks) {
@@ -442,6 +554,18 @@ class _QuestionParser {
 			q.feedback.splice(i, 1);
 			return;
 		}
+		if (options.compat) return;
+		// "… é o nó sinoatrial. A resposta correta é: Nó sinoatrial" no mesmo parágrafo
+		for (let i = q.feedback.length - 1; i >= 0; i--) {
+			const b = q.feedback[i];
+			if (!(b instanceof Paragraph)) continue;
+			const m = RIGHT_INLINE_RE.exec(b.text);
+			if (!m || !strip(b.text.slice(m.index + m[0].length))) continue;
+			const [head, tail] = _split_runs(b.runs, m.index + m[1].length);
+			q.right_answer = new Paragraph(tail);
+			q.feedback.splice(i, 1, ...(strip(head.map((r) => r.text).join("")) ? [new Paragraph(head)] : []));
+			return;
+		}
 	}
 
 	_resolve_answers(q) {
@@ -496,7 +620,14 @@ function _has_status_below(header, lines) {
 // Se "Questão N" é a última linha da página, devolve o topo da página seguinte
 // (onde o Moodle continua com "Correto / Atingiu…"); senão, null.
 function _spills_to_next_page(header, lines) {
-	if (lines.some((o) => o !== header && o.page === header.page && o.y0 > header.y0 + 1)) return null;
+	// só conta o que está abaixo na coluna do título (com a caixa ao lado, o enunciado
+	// fica à direita na mesma altura)
+	// fica de fora o resto da própria caixa ("Incorreto" cabe, "Atingiu…" vai para a próxima)
+	const info = (o) => {
+		const t = strip(o.text);
+		return STATUS_RE.test(t) || GRADE_RE.test(t) || GRADE_START_RE.test(t) || INFO_JUNK_RE.test(t);
+	};
+	if (lines.some((o) => o !== header && o.page === header.page && o.y0 > header.y0 + 1 && o.x0 < header.x1 + 20 && !info(o))) return null;
 	const next = lines.filter((o) => o.page === header.page + 1);
 	return next.length ? Math.min(...next.map((o) => o.y0)) : null;
 }
@@ -557,6 +688,7 @@ export function parse_moodle(content) {
 	const images = content.pages.flatMap((p) => p.images);
 	const icons = content.pages.flatMap((p) => p.icons);
 	const marks = content.pages.flatMap((p) => p.marks);
+	const radios = content.pages.flatMap((p) => p.radios || []);
 	const left_limit = Math.min(...headers.map((h) => h.x0)) - 8;
 	const title = clean_exam_title(content.title || content.header_title) || splitext(basename(content.path))[0];
 	const exam = new Exam({ title, source: content.path, kind: "moodle", content_width: content_width(lines) });
@@ -576,6 +708,7 @@ export function parse_moodle(content) {
 			marks.filter((mk) => keyLE(start, [mk.page, mk.cy, mk.cx]) && keyLT([mk.page, mk.cy, mk.cx], end)),
 			left_limit,
 			i === headers.length - 1,
+			radios.filter((r) => keyLE(start, [r.page, r.cy, r.cx]) && keyLT([r.page, r.cy, r.cx], end)),
 		);
 		exam.questions.push(q);
 	});
@@ -585,9 +718,10 @@ export function parse_moodle(content) {
 
 function _collect_warnings(exam) {
 	const missing = exam.questions.filter((q) => q.figure === "missing").map((q) => q.number);
-	if (missing.length) exam.warnings.push(`${missing.length} questão(ões) citam figura que não veio no PDF: ${missing.join(", ")}.`);
+	if (missing.length === 1) exam.warnings.push(`A questão ${missing[0]} cita uma figura que não veio no PDF.`);
+	else if (missing.length) exam.warnings.push(`${missing.length} questões citam figuras que não vieram no PDF: ${missing.join(", ")}.`);
 	const truncated = exam.questions.filter((q) => q.images.some((im) => im.truncated)).map((q) => q.number);
-	if (truncated.length) exam.warnings.push(`Figuras incompletas já no PDF original: questões ${truncated.join(", ")}.`);
+	if (truncated.length) exam.warnings.push(`Figuras incompletas já no PDF original: ${truncated.length === 1 ? "questão" : "questões"} ${truncated.join(", ")}.`);
 	if (missing.length || truncated.length) exam.warnings.push("Dica: na revisão do Moodle, role a página até o fim (para todas as figuras carregarem) antes de salvar o PDF.");
 	const no_key = exam.questions.filter((q) => q.options.length && !q.correct_labels.length).map((q) => q.number);
 	if (no_key.length) exam.warnings.push(`Não identifiquei a alternativa correta nas questões: ${no_key.join(", ")}.`);

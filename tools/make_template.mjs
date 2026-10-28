@@ -2,9 +2,10 @@
 // As partes vêm do modelo padrão do python-docx já com os estilos do Provas Girlie.
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import JSZip from "jszip";
 
-const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..");
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const src = path.join(root, "template_src");
 const zip = new JSZip();
 (function add(dir) {

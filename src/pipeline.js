@@ -47,6 +47,15 @@ function parse_pdf_content(content, name, details) {
 
 // file: { name, data: Uint8Array }. Devolve uma lista: um PDF montado juntando
 // várias provas vira uma prova por parte.
+// O MuPDF reconstrói PDFs cortados ou corrompidos sem reclamar; o que se perdeu some calado.
+function _was_repaired(content) {
+	try {
+		return Boolean(content.doc?.asPDF?.()?.wasRepaired());
+	} catch {
+		return false;
+	}
+}
+
 export async function load_exam(file, details, onPage) {
 	const ext = splitext(file.name)[1].toLowerCase();
 	const name = file.name;
@@ -59,7 +68,11 @@ export async function load_exam(file, details, onPage) {
 			throw exc;
 		}
 		try {
-			return (content.segments || [content]).map((part) => parse_pdf_content(part, name, details));
+			const exams = (content.segments || [content]).map((part) => parse_pdf_content(part, name, details));
+			if (!options.compat && _was_repaired(content)) {
+				for (const e of exams) e.warnings.unshift("O PDF estava danificado e foi consertado na leitura: confira se todas as questões vieram (se faltar alguma, salve o PDF de novo).");
+			}
+			return exams;
 		} finally {
 			content.close();
 		}
