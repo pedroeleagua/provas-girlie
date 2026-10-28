@@ -1,6 +1,6 @@
 // Guarda o app no aparelho para funcionar sem internet depois do primeiro acesso.
 // Ao publicar uma versão nova, mude CACHE para o navegador trocar os arquivos.
-const CACHE = "provas-girlie-1.0.2-web4";
+const CACHE = "provas-girlie-1.0.2-web5";
 
 const CODE = [
 	"./",
