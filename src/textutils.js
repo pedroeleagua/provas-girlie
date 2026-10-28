@@ -77,7 +77,8 @@ const _GENERIC_TAIL = /^(pode-se afirmar|podemos afirmar|é correto afirmar|est(
 
 function _first_sentence(text, limit = 70) {
 	text = strip(collapse_ws(text));
-	const m = /(.+?[.?!:])(\s|$)/u.exec(text);
+	// fora do modo .exe, iniciais ("M.J.S. 45 anos…") não encerram a frase
+	const m = (options.compat ? /(.+?[.?!:])(\s|$)/u : /(.{15,}?[.?!:])(\s|$)/u).exec(text);
 	let s = m ? m[1] : text;
 	if (Array.from(s).length > limit) {
 		const cut = rsplitFirst(Array.from(s).slice(0, limit).join(""));
@@ -92,9 +93,26 @@ function rsplitFirst(s) {
 	return i < 0 ? s : s.slice(0, i);
 }
 
+// "Sobre a morfofisiologia do tálamo, assinale…" → "Morfofisiologia do tálamo"
+const _ABOUT = /^(?:sobre|a respeito d[aeo]s?|acerca d[aeo]s?|em relação [àa]o?s?|com o conhecimento(?: adquirido)? (?:sobre|d[aeo]s?|n[aeo]s?)|com base n[aeo]s?|com base em)\s+(.{6,}?)\s*,\s*(?:assinale|marque|analise|avalie|indique|identifique|responda|julgue|considere|escolha|é correto|pode-se)/iu;
+
+function _about_topic(paras) {
+	for (const p of paras) {
+		const m = _ABOUT.exec(p);
+		if (!m) continue;
+		let s = strip(m[1].split(/[:;]/u)[0]).replace(/^(?:a|o|as|os)\s+/iu, "");
+		if (Array.from(s).length > 70) s = rstrip(rsplitFirst(Array.from(s).slice(0, 70).join("")), ",;:/") + "…";
+		const chars = Array.from(s);
+		if (chars.length >= 4) return chars[0].toUpperCase() + chars.slice(1).join("");
+	}
+	return "";
+}
+
 export function guess_topic(stem_paragraphs, answer_text) {
 	let ans = rstrip(strip(collapse_ws(answer_text || "")), ".");
 	const n = Array.from(ans).length;
+	// fora do modo .exe, o tema vem só do enunciado: o sumário não entrega a resposta
+	if (!options.compat) ans = "";
 	if (ans && n <= 130 && !_COUNT_ANSWER.test(ans)) {
 		if (n > 75) ans = rstrip(rsplitFirst(Array.from(ans).slice(0, 72).join("")), ",;:/") + "…";
 		const chars = Array.from(ans);
@@ -107,6 +125,8 @@ export function guess_topic(stem_paragraphs, answer_text) {
 		if (!options.compat && _GENERIC_TAIL.test(p)) continue;
 		return _first_sentence(p);
 	}
+	const about = options.compat ? "" : _about_topic(paras);
+	if (about) return about;
 	if (paras.length) return _first_sentence(paras[0]);
 	return "—";
 }
