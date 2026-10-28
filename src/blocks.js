@@ -2,6 +2,7 @@
 import { Image, Paragraph, Run } from "./models.js";
 import { PageImage, load_image } from "./pdf_extract.js";
 import { clean_runs } from "./textutils.js";
+import { options } from "./options.js";
 import { cmpTuple, rstrip } from "./py.js";
 
 const _ENUM_START = /^\(?([IVX]{1,5}|\p{Nd}{1,2}|[a-z])[.)\-–]\s/u;
@@ -22,6 +23,8 @@ function _starts_new_paragraph(prev, cur) {
 	const dy = cur.y0 - prev.y0;
 	if (Math.abs(dy) <= 2.0) return false;
 	if (dy > Math.max(prev.size, cur.size) * 1.75) return true;
+	// título grande seguido de texto (ex.: "M2 - Avaliação de Anatomia" e a questão 1)
+	if (!options.compat && Math.max(prev.size, cur.size) > 1.3 * Math.min(prev.size, cur.size)) return true;
 	if (cur.x0 > prev.x0 + 8) return true;
 	if (_ENUM_START.test(cur.text.trim()) && ENDS_SENTENCE.some((e) => rstrip(prev.text).endsWith(e))) return true;
 	return false;

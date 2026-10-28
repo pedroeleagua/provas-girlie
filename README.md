@@ -28,8 +28,13 @@ Depois do primeiro acesso ele funciona até sem internet.
 Antes de salvar a revisão em PDF, role a página inteira até o fim e espere as figuras
 aparecerem. Se alguma figura não vier, o caderno mostra uma caixa “Atenção” no lugar dela.
 
-Também aceita arquivos **.docx** e PDFs que não são do Moodle (listas, simulados): o
-conteúdo entra completo, com as imagens, no mesmo visual.
+Funciona com PDFs salvos pelo Safari (iPad/iPhone), Chrome e Edge. Um PDF montado
+juntando várias revisões vira uma prova por parte.
+
+Também aceita a **prova feita no Word** (PDF ou .docx) com as questões numeradas
+“1)”, alternativas “a)” e um **Gabarito** no fim (“1 – D”): as questões são separadas e a
+resposta certa de cada uma vai para o gabarito. Outros arquivos (listas, simulados)
+entram completos, com as imagens, no mesmo visual.
 
 ## Como foi feito
 
@@ -49,6 +54,8 @@ O resultado é conferido contra o programa original: `npm test` gera os cadernos
 de PDFs de teste e compara cada parte do `.docx` com a saída do `.exe`. Os documentos saem
 idênticos — a única diferença aceita é a regravação de uma figura que já estava
 incompleta no PDF (o original usa o codificador JPEG do Pillow; aqui é o do MuPDF).
+Essa comparação roda no modo de compatibilidade (`src/options.js`); fora dele, o app
+traz as correções da versão web (PDFs do Safari e do Edge, PDFs mesclados, prova do Word).
 
 ## Desenvolvimento
 

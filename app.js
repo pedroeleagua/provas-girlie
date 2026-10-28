@@ -244,7 +244,7 @@ function finish(res) {
 	dl.href = lastUrl;
 	dl.download = name;
 	const nq = res.exams.reduce((a, e) => a + e.questions.length, 0);
-	for (const e of res.exams) log(`✓ ${e.title}: ${e.questions.length} questões (${e.kind === "moodle" ? "revisão do Moodle" : "conteúdo corrido"})`, "ok");
+	for (const e of res.exams) log(`✓ ${e.title}: ${e.questions.length} questões (${{ moodle: "revisão do Moodle", prova: "prova com gabarito" }[e.kind] || "conteúdo corrido"})`, "ok");
 	for (const w of res.warnings) log(`⚠ ${w}`, "warn");
 	setProgress(1);
 	showStatus(`Pronto! ${res.exams.length} prova(s), ${nq} questões → ${name}`, "ok");

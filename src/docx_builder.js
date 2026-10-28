@@ -588,14 +588,14 @@ export class DocxBuilder {
 		if (exams.length > 1) bits.push(`${exams.length} provas`);
 		if (nq) bits.push(`${nq} questões`);
 		if (exams.some((e) => e.questions.some((q) => q.images.length)) || exams.some((e) => e.blocks.some((b) => b instanceof Image))) bits.push("figuras originais");
-		if (nq) bits.push("gabarito comentado");
+		if (nq) bits.push(exams.every((e) => e.kind === "prova") ? "gabarito" : "gabarito comentado");
 		if (bits.length) this._para("♡  " + bits.join("  ·  ") + "  ♡", CENTER, 0, 18, { size: 10.5, color: T.MINT_DARK });
 		if (exams.length === 1 && exams[0].info.length) {
 			this._table(["Dados da prova", "Informação"], exams[0].info.map(([k, v]) => [k, v]), [5.0, 12.0]);
 		} else if (exams.length > 1) {
 			const rows = exams.map((e, idx) => {
 				const sc = exam_score(e);
-				const nota = _info_value(e, "notas") || (sc.total ? `${sc.correct}/${sc.total}` : "—");
+				const nota = _info_value(e, "notas") || (sc.total && e.kind !== "prova" ? `${sc.correct}/${sc.total}` : "—");
 				return [String(idx + 1), e.title, e.questions.length ? String(e.questions.length) : "—", nota];
 			});
 			this._table(["Prova", "Título", "Questões", "Notas"], rows, [1.6, 10.2, 2.2, 3.0]);
@@ -628,7 +628,7 @@ export class DocxBuilder {
 				const fig = { yes: "Sim", missing: "Não no PDF", none: "—" }[q.figure];
 				rows.push([q.number, DocxBuilder._link_cell(q.topic || "—", `${prefix}_q${i}`), fig]);
 			});
-			rows.push(["G", DocxBuilder._link_cell("Gabaritos comentados (ao final da prova)", `${prefix}_gab`), "—"]);
+			rows.push(["G", DocxBuilder._link_cell(e.kind === "prova" ? "Gabarito (ao final da prova)" : "Gabaritos comentados (ao final da prova)", `${prefix}_gab`), "—"]);
 		});
 		const t = this._table(header, rows, widths);
 		const trs = t.rows;
@@ -716,6 +716,15 @@ export class DocxBuilder {
 
 	answer_key(exam, prefix, label) {
 		this._page_break();
+		// prova impressa: só existe a resposta certa (não há "sua resposta" nem correção)
+		if (exam.kind === "prova") {
+			this.band(`Gabarito${label}`, "Resposta correta de cada questão", T.GABARITO_BAND, false, `${prefix}_gab`);
+			const rows = exam.questions.map((q) => [q.number, q.correct_labels.map((l) => `${l})`).join(", ") || "—"]);
+			this._table(["Questão", "Alternativa correta"], rows, [5.0, 12.0]);
+			this._spacer(8);
+			exam.questions.forEach((q, i) => this._answer_block(q, `${prefix}_g${i}`, true));
+			return;
+		}
 		this.band(`Gabaritos comentados${label}`, "Resposta correta, sua resposta e correções de cada questão", T.GABARITO_BAND, false, `${prefix}_gab`);
 		const sc = exam_score(exam);
 		if (sc.total) {
@@ -739,7 +748,7 @@ export class DocxBuilder {
 		exam.questions.forEach((q, i) => this._answer_block(q, `${prefix}_g${i}`));
 	}
 
-	_answer_block(q, anchor) {
+	_answer_block(q, anchor, printed = false) {
 		const h = this.doc.add_paragraph("Heading3");
 		_spacing(h, 10, 2);
 		_keep_next(h);
@@ -754,8 +763,10 @@ export class DocxBuilder {
 		const mine = q.selected_labels.map((l) => `${l})`).join(", ") || "—";
 		_add_text(line, "Alternativa correta: ", { size: 9.5, color: T.MUTED });
 		_add_text(line, correct, { size: 9.5, bold: true, color: T.MINT_DARK });
-		_add_text(line, "   ·   Sua resposta: ", { size: 9.5, color: T.MUTED });
-		_add_text(line, mine, { size: 9.5, bold: true, color: T.PINK_DARK });
+		if (!printed) {
+			_add_text(line, "   ·   Sua resposta: ", { size: 9.5, color: T.MUTED });
+			_add_text(line, mine, { size: 9.5, bold: true, color: T.PINK_DARK });
+		}
 		if (q.status) {
 			_add_text(line, "   ·   ", { size: 9.5, color: T.MUTED });
 			_add_text(line, _status_symbol(q.status) + q.status, { size: 9.5, bold: true, color: _status_color(q.status) });
@@ -813,6 +824,8 @@ export class DocxBuilder {
 				const title = groups.length > 1 ? `Parte ${g_i < ROMAN.length ? ROMAN[g_i] : g_i + 1} · ${rng}` : rng;
 				const sub = multi ? `Prova ${k} · ${exam.title}` : exam.title;
 				this.band(title, sub, T.BAND_COLORS[(g_i + (k - 1)) % T.BAND_COLORS.length]);
+				// instruções que vêm antes da questão 1 numa prova impressa
+				if (g_i === 0 && exam.kind === "prova" && exam.blocks.length) this._blocks(exam.blocks, exam.content_width);
 				for (const q of group) this.question(q, `${prefix}_q${index.get(q)}`, exam.content_width);
 			});
 			this.answer_key(exam, prefix, multi ? ` · Prova ${k}` : "");

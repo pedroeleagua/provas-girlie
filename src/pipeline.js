@@ -2,6 +2,8 @@
 import { DocxBuilder, save_docx } from "./docx_builder.js";
 import { parse_docx, parse_generic_pdf } from "./generic_parser.js";
 import { parse_moodle } from "./moodle_parser.js";
+import { options } from "./options.js";
+import { parse_printed } from "./printed_parser.js";
 import { PdfError, read_pdf } from "./pdf_extract.js";
 import { suggest_cover } from "./textutils.js";
 import { splitext } from "./py.js";
@@ -27,7 +29,24 @@ export function compareNatural(a, b) {
 	return ka.length - kb.length;
 }
 
-// file: { name, data: Uint8Array }
+// Moodle → prova do Word com gabarito → texto corrido.
+function parse_pdf_content(content, name, details) {
+	let exam;
+	try {
+		exam = parse_moodle(content);
+	} catch (exc) {
+		details?.push(`${name}: falha no modo Moodle\n${exc?.stack || exc}`);
+		exam = parse_generic_pdf(content);
+		exam.warnings.push("Não consegui separar as questões e o gabarito deste PDF; o conteúdo entrou completo, em texto corrido.");
+		return exam;
+	}
+	if (exam) return exam;
+	const generic = parse_generic_pdf(content);
+	return (!options.compat && parse_printed(generic)) || generic;
+}
+
+// file: { name, data: Uint8Array }. Devolve uma lista: um PDF montado juntando
+// várias provas vira uma prova por parte.
 export async function load_exam(file, details, onPage) {
 	const ext = splitext(file.name)[1].toLowerCase();
 	const name = file.name;
@@ -40,27 +59,19 @@ export async function load_exam(file, details, onPage) {
 			throw exc;
 		}
 		try {
-			let exam;
-			try {
-				exam = parse_moodle(content);
-			} catch (exc) {
-				details?.push(`${name}: falha no modo Moodle\n${exc?.stack || exc}`);
-				exam = parse_generic_pdf(content);
-				exam.warnings.push("Não consegui separar as questões e o gabarito deste PDF; o conteúdo entrou completo, em texto corrido.");
-				return exam;
-			}
-			if (exam) return exam;
-			return parse_generic_pdf(content);
+			return (content.segments || [content]).map((part) => parse_pdf_content(part, name, details));
 		} finally {
 			content.close();
 		}
 	}
 	if (ext === ".docx") {
+		let generic;
 		try {
-			return await parse_docx(file.data, name);
+			generic = await parse_docx(file.data, name);
 		} catch (exc) {
 			throw new UserError(`${name}: ${exc.message}`);
 		}
+		return [(!options.compat && parse_printed(generic)) || generic];
 	}
 	throw new UserError(`${name}: formato não suportado (use PDF ou DOCX).`);
 }
@@ -76,7 +87,7 @@ export async function generate(files, { header = "", title = "", subtitle = "", 
 		const base = 0.05 + (0.55 * i) / n;
 		step(`Lendo ${f.name}…`, base);
 		try {
-			exams.push(await load_exam(f, details, (pg, total) => step(`Lendo ${f.name}… página ${pg} de ${total}`, base + (0.55 / n) * (pg / total))));
+			exams.push(...await load_exam(f, details, (pg, total) => step(`Lendo ${f.name}… página ${pg} de ${total}`, base + (0.55 / n) * (pg / total))));
 		} catch (exc) {
 			if (exc instanceof UserError) throw exc;
 			exc.notes = [...(exc.notes || []), `Arquivo: ${f.name}`];

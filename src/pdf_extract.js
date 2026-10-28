@@ -6,7 +6,8 @@
 // navegador são removidos e subscritos/sobrescritos soltos são reencaixados
 // na linha a que pertencem (ex.: O + ₂).
 import { Image } from "./models.js";
-import { D, cmpTuple, median, mostCommonKey, pyRound, strip, rstrip } from "./py.js";
+import { options } from "./options.js";
+import { D, basename, cmpTuple, median, mostCommonKey, pyRound, splitext, strip, rstrip } from "./py.js";
 
 let mupdf = null;
 export function setMupdf(m) {
@@ -192,6 +193,11 @@ function rawdictLines(page, pageRect) {
 	return lines;
 }
 
+function saturated(color) {
+	const r = (color >> 16) & 255, g = (color >> 8) & 255, b = color & 255;
+	return Math.max(r, g, b) - Math.min(r, g, b) >= 50;
+}
+
 function _span_from_raw(raw) {
 	const font = raw.font || "";
 	const flags = raw.flags || 0;
@@ -203,6 +209,12 @@ function _span_from_raw(raw) {
 	for (const ch of raw.chars || []) {
 		const c = ch.c;
 		const [x0, y0, x1, y1] = ch.bbox;
+		if ((c === "\ufffd" || c === "\u0000") && !options.compat) {
+			// Glifo sem caractere (PDFs do PDFium): vem como "\ufffd" ou, com a opção de CID,
+			// como U+0000. Colorido é o ✓/✗ do Moodle; cinza é enfeite e não entra no texto.
+			if (saturated(color)) icons.push(new Icon(0, x0, y0, x1, y1, color));
+			continue;
+		}
 		if (PUA.test(c) || (is_icon_font && strip(c))) {
 			icons.push(new Icon(0, x0, y0, x1, y1, color));
 			continue;
@@ -323,12 +335,39 @@ function _span_with_chars(s, chars) {
 	return new Span(chars.map((c) => c[0]).join(""), s.bold, s.italic, s.size, s.color, chars[0][1], chars[chars.length - 1][2], s.origin_y, [...chars], s.sub, s.sup);
 }
 
+// Alguns navegadores separam "Questão" e o número em linhas diferentes: junta de volta.
+const LONE_QWORD_RE = /^(?:Questão|Questao|Question|Pergunta)$/iu;
+function _merge_split_headers(lines, page_no) {
+	const removed = new Set();
+	let changed = false;
+	const out = lines.map((ln) => {
+		if (removed.has(ln) || !LONE_QWORD_RE.test(strip(ln.text))) return ln;
+		const num = lines.find((o) => o !== ln && !removed.has(o) && /^\p{Nd}+$/u.test(strip(o.text)) &&
+			o.x0 >= ln.x1 - 3 && o.x0 <= ln.x1 + 15 &&
+			Math.min(o.y1, ln.y1) - Math.max(o.y0, ln.y0) > 0.3 * Math.min(o.y1 - o.y0, ln.y1 - ln.y0));
+		if (!num) return ln;
+		removed.add(num);
+		changed = true;
+		const spans = [...ln.spans];
+		if (!/\s$/u.test(ln.text)) {
+			const s = spans[spans.length - 1];
+			spans.push(new Span(" ", s.bold, s.italic, s.size, s.color, s.x1, s.x1, s.origin_y, [[" ", s.x1, s.x1]]));
+		}
+		return new Line(page_no, ln.x0, Math.min(ln.y0, num.y0), Math.max(ln.x1, num.x1), Math.max(ln.y1, num.y1), [...spans, ...num.spans]);
+	});
+	return changed ? out.filter((ln) => !removed.has(ln)) : lines;
+}
+
+// "Questão N", "Correto", "Atingiu…" no topo da página não são cabeçalho do navegador,
+// mesmo repetidos em todas as páginas.
+const QUIZ_LINE_RE = /^(?:(?:Questão|Questao|Question|Pergunta)\s+\p{Nd}+|Correto|Incorreto|Parcialmente correto|Correct|Incorrect|Partially correct|Não respondid[ao]|Atingiu\s.+|Vale\s.+|Mark\s.+)\.?$/iu;
+
 const _BOILER = new RegExp(`^(https?://\\S+|www\\.\\S+|${D}{1,2}/${D}{1,2}/${D}{2,4},?\\s+${D}{1,2}:${D}{2}(\\s*[AP]M)?|${D}+\\s*/\\s*${D}+|(p[áa]gina|page)\\s+${D}+(\\s+(de|of)\\s+${D}+)?)$`, "iu");
 const DIGITS = new RegExp(`${D}+`, "gu");
 
 function _strip_running_heads(pages) {
 	const n = pages.length;
-	const band = (p, ln) => ln.y1 < p.height * 0.06 || ln.y0 > p.height * 0.94;
+	const band = (p, ln) => (ln.y1 < p.height * 0.06 || ln.y0 > p.height * 0.94) && (options.compat || !QUIZ_LINE_RE.test(strip(ln.text)));
 	const counts = new Map();
 	for (const p of pages) {
 		const seen = new Set();
@@ -496,6 +535,8 @@ function _extract_page_images(doc, page, page_no, placements, pageRect) {
 		const vis = [Math.max(bx0, pageRect[0]), Math.max(by0, pageRect[1]), Math.min(bx1, pageRect[2]), Math.min(by1, pageRect[3])];
 		const vw = vis[2] - vis[0], vh = vis[3] - vis[1];
 		if (vw <= 0 || vh <= 0 || (vw < 24 && vh < 24)) continue;
+		// faixas finas (a coluna de bolinhas das alternativas, linhas) também não são figuras
+		if (!options.compat && (vw < 24 || vh < 24)) continue;
 		if (objs === null) {
 			objs = pageImageObjects(page);
 			for (const o of objs) {
@@ -506,10 +547,49 @@ function _extract_page_images(doc, page, page_no, placements, pageRect) {
 			}
 		}
 		const info = byPointer.get(pl.image.pointer) || null;
+		if (!options.compat && isDecoration(pl.image, info, vis, pageRect)) continue;
 		out.push(new PageImage(page_no, vis[0], vis[1], vis[2], vis[3], info ? info.xref : 0, pl.image, info));
 	}
 	out.sort((a, b) => cmpTuple([a.y0, a.x0], [b.y0, b.x0]));
 	return out;
+}
+
+// Fundos, molduras e sombras que alguns navegadores (PDFium) gravam como imagem:
+// largas, quase sem dados comprimidos e praticamente brancas. Não são figuras.
+function isDecoration(image, info, vis, pageRect) {
+	try {
+		if (vis[2] - vis[0] < 0.6 * (pageRect[2] - pageRect[0])) return false;
+		if (!info || info.dct || info.jpx) return false;
+		const w = image.getWidth(), h = image.getHeight();
+		if (w * h < 40000) return false;
+		if (info.obj.readRawStream().getLength() / (w * h) > 0.05) return false;
+		const base = image.toPixmap();
+		const mask = image.getMask() ? image.getMask().toPixmap() : null;
+		const n = base.getNumberOfComponents(), bs = n + base.getAlpha();
+		if (n !== 1 && n !== 3) return false;
+		const bw = base.getWidth(), bh = base.getHeight();
+		const mw = mask ? mask.getWidth() : 0, mh = mask ? mask.getHeight() : 0;
+		const ms = mask ? mask.getNumberOfComponents() + mask.getAlpha() : 0;
+		const px = base.getPixels();
+		const mp = mask ? mask.getPixels() : null;
+		const step = Math.max(1, Math.floor(Math.sqrt((bw * bh) / 40000)));
+		let ink = 0, total = 0;
+		for (let y = 0; y < bh; y += step) {
+			for (let x = 0; x < bw; x += step) {
+				const i = (y * bw + x) * bs;
+				let v = n === 1 ? px[i] : Math.min(px[i], px[i + 1], px[i + 2]);
+				if (mp) {
+					const a = mp[(Math.floor((y * mh) / bh) * mw + Math.floor((x * mw) / bw)) * ms] / 255;
+					v = v * a + 255 * (1 - a);
+				}
+				if (v < 200) ink++;
+				total++;
+			}
+		}
+		return total > 0 && ink / total < 0.02;
+	} catch {
+		return false;
+	}
 }
 
 // Um JPEG completo termina com o marcador EOI (FF D9).
@@ -565,8 +645,17 @@ export function load_image(content, pim) {
 				if (!info.jpx && !info.smask && (ncomp === 1 || ncomp === 3)) {
 					const ext = info.dct ? "jpeg" : "png";
 					// asUint8Array() é só uma janela na memória do WebAssembly: copia antes que ela seja reaproveitada
-					const raw = info.dct ? info.obj.readRawStream().asUint8Array().slice() : pngFromImage(img);
-					const checked = _validated(raw, ext);
+					let raw = info.dct ? info.obj.readRawStream().asUint8Array().slice() : pngFromImage(img);
+					let rawExt = ext;
+					if (!options.compat && !info.dct && raw.length > 300000) {
+						// Foto guardada sem compressão de foto (PDFium): em JPEG o caderno fica bem menor.
+						const jpg = jpegFromImage(img);
+						if (jpg && jpg.length < raw.length * 0.6) {
+							raw = jpg;
+							rawExt = "jpeg";
+						}
+					}
+					const checked = _validated(raw, rawExt);
 					if (checked !== null) {
 						const [data, fmt, truncated, iw, ih] = checked;
 						const [pw, ph] = _display_size(width_pt, height_pt, iw, ih);
@@ -600,6 +689,17 @@ export function load_image(content, pim) {
 	}
 }
 
+function jpegFromImage(img) {
+	try {
+		let pix = img.toPixmap();
+		const cs = pix.getColorSpace();
+		if (!cs || !(cs.isRGB() || cs.isGray()) || pix.getAlpha()) pix = pix.convertToColorSpace(mupdf.ColorSpace.DeviceRGB, false);
+		return pix.asJPEG(90, false);
+	} catch {
+		return null;
+	}
+}
+
 function pngFromImage(img) {
 	let pix = img.toPixmap();
 	if (pix.getAlpha()) pix = pix.convertToColorSpace(pix.getColorSpace() || mupdf.ColorSpace.DeviceRGB, false);
@@ -624,6 +724,7 @@ export async function read_pdf(data, path, onPage = null) {
 		const pc = new PageContent(i, b[2] - b[0], b[3] - b[1]);
 		const [lines, icons] = _extract_lines(page, i, pageRect);
 		pc.lines = _merge_script_fragments(lines);
+		if (!options.compat) pc.lines = _merge_split_headers(pc.lines, i);
 		pc.icons = icons;
 		let scan = { drawings: [], placements: [] };
 		try {
@@ -635,16 +736,106 @@ export async function read_pdf(data, path, onPage = null) {
 			pc.images = [];
 		}
 		pc.marks = _extract_marks(scan.drawings, i);
+		if (!options.compat) pc.fonts = pageFontXrefs(page);
 		pages.push(pc);
 	}
-	const header_title = _strip_running_heads(pages);
-	for (const p of pages) p.lines = sort_reading_order(p.lines);
 	let title = "";
 	try {
 		title = doc.getMetaData("info:Title") || "";
 	} catch { /* sem metadados */ }
-	title = title || header_title;
-	return new PdfContent(path, title, pages, doc, header_title);
+	const groups = options.compat ? [pages] : split_documents(pages);
+	if (groups.length === 1) {
+		const header_title = _strip_running_heads(pages);
+		for (const p of pages) p.lines = sort_reading_order(p.lines);
+		return new PdfContent(path, title || header_title, pages, doc, header_title);
+	}
+	// Vários PDFs juntados num só: cada parte vira uma prova, com os próprios cabeçalhos.
+	const whole = new PdfContent(path, title, pages, doc, "");
+	const [stem] = splitext(basename(path));
+	whole.segments = groups.map((seg, k) => {
+		const header_title = _strip_running_heads(seg);
+		for (const p of seg) p.lines = sort_reading_order(p.lines);
+		const part = new PdfContent(`${stem} (parte ${k + 1} de ${groups.length}).pdf`, header_title, seg, doc, header_title);
+		part.close = () => {};
+		return part;
+	});
+	return whole;
+}
+
+// Fontes de sistema que aparecem em documentos de qualquer origem: não ajudam a separar.
+const COMMON_FONT_RE = /^(arial|helvetica|times|courier|symbol|zapfdingbats|liberation|dejavu)/i;
+
+// Fontes usadas pela página (objetos do PDF e nomes "de marca"), inclusive dentro de formulários.
+function pageFontXrefs(page) {
+	const out = new Set();
+	out.names = new Set();
+	const seen = new Set();
+	const walk = (res) => {
+		if (!res || res.isNull()) return;
+		const fonts = res.get("Font");
+		if (fonts && fonts.isDictionary()) {
+			fonts.forEach((f) => {
+				if (f.isIndirect()) out.add(f.asIndirect());
+				const base = f.get("BaseFont");
+				const name = base && !base.isNull() ? base.asName().replace(/^[A-Z]{6}\+/, "") : "";
+				if (name && !COMMON_FONT_RE.test(name)) out.names.add(name);
+			});
+		}
+		const xobjs = res.get("XObject");
+		if (!xobjs || !xobjs.isDictionary()) return;
+		xobjs.forEach((x) => {
+			const id = x.isIndirect() ? x.asIndirect() : 0;
+			if (id && seen.has(id)) return;
+			if (id) seen.add(id);
+			const st = x.get("Subtype");
+			if (st && !st.isNull() && st.asName() === "Form") walk(x.get("Resources"));
+		});
+	};
+	try {
+		walk(page.getObject().getInheritable("Resources"));
+	} catch { /* sem recursos */ }
+	return out;
+}
+
+// Começo de uma "Revisão da tentativa": a tabela "Iniciado / Situação" no alto da página.
+const REVIEW_START_RE = /^(Iniciado|Iniciado em|Started on)$/iu;
+const QUIZ_HEADER_RE = /^(?:Questão|Questao|Question|Pergunta)\s+\p{Nd}+$/iu;
+
+// Um PDF montado juntando outros (ex.: "PDFs_Mesclados") muda de fontes de uma vez:
+// a parte nova não reusa nenhum objeto de fonte da anterior, os anteriores não voltam
+// e menos da metade das fontes "de marca" já tinham aparecido. (O PDFium cria objetos
+// de fonte novos a cada página, mas com os mesmos nomes; por isso a regra dos nomes.)
+// Duas revisões do mesmo navegador juntadas se separam pela tabela do começo.
+export function split_documents(pages) {
+	const last = new Map();
+	pages.forEach((p, i) => { for (const f of p.fonts || []) last.set(f, i); });
+	const groups = [];
+	let cur = [];
+	let curFonts = new Set();
+	let curNames = new Set();
+	let curHasQuestions = false;
+	pages.forEach((p, i) => {
+		const fonts = p.fonts || new Set();
+		const names = fonts.names || new Set();
+		const disjoint = fonts.size > 0 && curFonts.size > 0 && [...fonts].every((f) => !curFonts.has(f));
+		const oldGone = [...curFonts].every((f) => last.get(f) < i);
+		const known = names.size ? [...names].filter((n) => curNames.has(n)).length / names.size : 1;
+		const newFonts = disjoint && oldGone && curNames.size > 0 && known < 0.5;
+		const newReview = curHasQuestions && p.lines.some((ln) => ln.y0 < p.height * 0.4 && REVIEW_START_RE.test(strip(ln.text)));
+		if (cur.length && (newFonts || newReview)) {
+			groups.push(cur);
+			cur = [];
+			curFonts = new Set();
+			curNames = new Set();
+			curHasQuestions = false;
+		}
+		cur.push(p);
+		for (const f of fonts) curFonts.add(f);
+		for (const n of names) curNames.add(n);
+		if (p.lines.some((ln) => QUIZ_HEADER_RE.test(strip(ln.text)))) curHasQuestions = true;
+	});
+	if (cur.length) groups.push(cur);
+	return groups;
 }
 
 export function sort_reading_order(lines) {

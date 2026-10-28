@@ -6,6 +6,7 @@ import * as mupdf from "mupdf";
 import JSZip from "jszip";
 import { DOMParser } from "@xmldom/xmldom";
 import { init } from "../src/env.js";
+import { options } from "../src/options.js";
 import { generate } from "../src/pipeline.js";
 
 const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
@@ -13,6 +14,7 @@ const root = path.resolve(here, "..");
 const data = path.resolve(root, "..", "testdata");
 
 init({ mupdf, JSZip, DOMParser, today: () => new Date(2026, 9, 28) });
+options.compat = true; // paridade com o .exe original
 const coverPng = new Uint8Array(fs.readFileSync(path.join(root, "assets", "cover.png")));
 const templateZip = new Uint8Array(fs.readFileSync(path.join(root, "assets", "template.zip")));
 

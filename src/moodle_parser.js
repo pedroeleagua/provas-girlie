@@ -6,7 +6,8 @@
 // com "A resposta correta é: ...").
 import { BlockBuilder, item_key, paragraphs } from "./blocks.js";
 import { Exam, MissingFigure, Option, Paragraph, Question, Run } from "./models.js";
-import { Line, body_size, content_width } from "./pdf_extract.js";
+import { Line, Span, body_size, content_width } from "./pdf_extract.js";
+import { options } from "./options.js";
 import { clean_exam_title, guess_topic, match_answer } from "./textutils.js";
 import { BE, BS, D, W, basename, cmpTuple, hasKey, mostCommonKey, pyRound, rstrip, splitext, strip } from "./py.js";
 
@@ -41,6 +42,10 @@ const INFO_LABELS = {
 	"marks": "Notas",
 	"grade": "Nota",
 };
+
+// Rótulos da tabela do topo, para quando o PDF não guarda o negrito (Safari do iOS
+// grava a fonte do sistema sempre como "Regular").
+const INFO_WORDS = new Set([...Object.keys(INFO_LABELS), ...Object.values(INFO_LABELS).map((v) => v.toLowerCase()), "tempo", "empregado"]);
 
 const keyLE = (a, b) => cmpTuple(a, b) <= 0;
 const keyLT = (a, b) => cmpTuple(a, b) < 0;
@@ -80,15 +85,22 @@ function _parse_info(lines) {
 	lines = lines.flatMap((ln) => _split_label_value(ln, value_col));
 	const plain = lines.filter((ln) => !_is_bold(ln));
 	const value_x = plain.length ? Math.min(...plain.map((ln) => ln.x0)) : null;
-	const labels = [], values = [];
+	let labels = [], values = [];
 	for (const ln of lines) {
 		if (_is_bold(ln) && (value_x === null || ln.x1 < value_x + 1)) labels.push(ln);
 		else values.push(ln);
 	}
+	let rowTol = 3;
+	if (!labels.length && !options.compat) {
+		// Sem negrito no PDF: reconhece os rótulos pelo nome.
+		labels = lines.filter((ln) => INFO_WORDS.has(strip(ln.text).toLowerCase()));
+		values = lines.filter((ln) => !labels.includes(ln));
+		rowTol = 4;
+	}
 	const rows = [];
 	const used = new Set();
 	for (const lab of labels) {
-		const same = values.filter((v) => v.page === lab.page && Math.abs(v.y0 - lab.y0) < 3 && !used.has(v));
+		const same = values.filter((v) => v.page === lab.page && Math.abs(v.y0 - lab.y0) < rowTol && !used.has(v));
 		const txt = strip(lab.text);
 		if (same.length) {
 			for (const v of same) used.add(v);
@@ -146,33 +158,108 @@ function _find_labels(lines) {
 		if (m) cands.push([ln, m[1]]);
 	}
 	let found = chains(cands);
-	if (found.length) return [found[found.length - 1], new Map()];
+	if (found.length) {
+		const chain = found[found.length - 1];
+		const text_lines = new Map();
+		const extended = !options.compat && _extend_chain(chain, lines, text_lines);
+		return [chain, text_lines, extended];
+	}
 	cands = [];
 	for (const ln of lines) {
 		const m = LABEL_INLINE_RE.exec(strip(ln.text));
 		if (m) cands.push([ln, m[1]]);
 	}
 	found = chains(cands);
-	if (!found.length) return [[], new Map()];
+	if (found.length) {
+		const chain = found[found.length - 1];
+		const text_lines = new Map();
+		for (const ln of chain) text_lines.set(ln, _strip_inline_label(ln));
+		const extended = !options.compat && _extend_chain(chain, lines, text_lines);
+		return [chain, text_lines, extended];
+	}
+	if (options.compat) return [[], new Map(), false];
+	// PDFs do Safari (iOS) e do PDFium: a letra vem colada no texto ("a.2=Tálamo",
+	// "a.a) …"), às vezes só na primeira alternativa. Junta as duas formas.
+	cands = [];
+	const glued = new Set();
+	const weak = new Set(); // "a.2=…" sem separação visível: só vale junto de letras claras
+	for (const ln of lines) {
+		const t = strip(ln.text);
+		let m = LABEL_RE.exec(t);
+		if (m) {
+			cands.push([ln, m[1]]);
+			continue;
+		}
+		m = LABEL_INLINE_RE.exec(t);
+		let letter = m ? m[1] : _glued_label(ln);
+		if (!letter && /^[a-zA-Z][.)]\S/u.test(t)) {
+			letter = t[0];
+			weak.add(ln);
+		}
+		if (letter) {
+			cands.push([ln, letter]);
+			glued.add(ln);
+		}
+	}
+	found = chains(cands).filter((ch) => ch.some((ln) => !weak.has(ln)));
+	if (!found.length) return [[], new Map(), false];
 	const chain = found[found.length - 1];
 	const text_lines = new Map();
-	for (const ln of chain) text_lines.set(ln, _strip_inline_label(ln));
-	return [chain, text_lines];
+	for (const ln of chain) if (glued.has(ln)) text_lines.set(ln, _strip_inline_label(ln, true));
+	return [chain, text_lines, true];
 }
 
-function _strip_inline_label(ln) {
+// Depois de "a." e "b." sozinhos, as letras seguintes às vezes vêm coladas no texto
+// ("c.Núcleo…", "d. Núcleo…"): continua a sequência na mesma coluna.
+function _extend_chain(chain, lines, text_lines) {
+	const x0 = chain[0].x0;
+	const next = (ch) => String.fromCharCode(ch.toLowerCase().charCodeAt(0) + 1);
+	let expect = next(strip(chain[chain.length - 1].text)[0]);
+	let extended = false;
+	for (const ln of lines.slice(lines.indexOf(chain[chain.length - 1]) + 1)) {
+		// a bolinha marcada às vezes empurra a letra alguns pontos para a direita
+		if (ln.x0 < x0 - 3 || ln.x0 > x0 + 20) continue;
+		const t = strip(ln.text);
+		if (!new RegExp(`^${expect}[.)]`, "iu").test(t)) continue;
+		chain.push(ln);
+		if (!LABEL_RE.test(t)) text_lines.set(ln, _strip_inline_label(ln, true));
+		expect = next(expect);
+		extended = true;
+	}
+	return extended;
+}
+
+// "a." no começo da linha, separado do resto por um espaço visual (sem caractere de
+// espaço) ou desenhado por cima do texto (o texto "volta" para trás, como no Safari).
+function _glued_label(ln) {
+	const chars = ln.spans.flatMap((s) => s.chars).filter(([c]) => strip(c));
+	if (chars.length < 3) return null;
+	const [[c0], [c1, , x1], [, x2]] = chars;
+	if (!/^[a-zA-Z]$/u.test(c0) || !".)".includes(c1)) return null;
+	return x2 - x1 >= 2.0 || x2 < x1 - 1.0 ? c0 : null;
+}
+
+function _strip_inline_label(ln, dedupe = false) {
 	const spans = ln.spans.map((s) => Object.assign(Object.create(Object.getPrototypeOf(s)), s));
 	while (spans.length && !strip(spans[0].text)) spans.shift();
-	const m = /^\s*[a-zA-Z][.)]\s*/u.exec(spans[0].text);
+	const m = /^\s*([a-zA-Z])[.)]\s*/u.exec(spans[0].text);
 	spans[0].text = m ? spans[0].text.slice(m[0].length) : spans[0].text;
 	if (!spans[0].text) spans.shift();
+	if (dedupe && m && spans.length) {
+		// a professora também escreveu uma letra no texto ("b. a) …"): fica só a do Moodle
+		const again = /^\s*[a-eA-E][.)]\s+/u.exec(spans[0].text);
+		if (again) {
+			spans[0].text = spans[0].text.slice(again[0].length);
+			if (!spans[0].text) spans.shift();
+		}
+	}
 	return new Line(ln.page, ln.x0 + 1, ln.y0, ln.x1, ln.y1, spans);
 }
 
-function _row_index(labels, it) {
+function _row_index(labels, it, tol = 1.5) {
 	let idx = 0;
 	labels.forEach((lab, k) => {
-		if (keyLE([lab.page, lab.y0 - 1.5], [it.page, it.y0])) idx = k;
+		if (keyLE([lab.page, lab.y0 - tol], [it.page, it.y0])) idx = k;
 	});
 	return idx;
 }
@@ -187,9 +274,12 @@ class _QuestionParser {
 	parse(header, lines, imgs, icons, marks, left_limit, is_last) {
 		const q = new Question(QUESTION_RE.exec(strip(header.text))[1]);
 		const body = [];
+		// "Questão N" no pé da página: o "Correto / Atingiu…" foi para o topo da seguinte.
+		const spill = options.compat ? null : _spills_to_next_page(header, lines);
 		for (const ln of lines) {
 			const t = strip(ln.text);
-			const near_header = ln.page === header.page && -2 <= ln.y0 - header.y1 && ln.y0 - header.y1 < 60;
+			const near_header = (ln.page === header.page && -2 <= ln.y0 - header.y1 && ln.y0 - header.y1 < 60) ||
+				(spill !== null && ln.page === header.page + 1 && ln.y0 - spill < 60);
 			if (ln.x0 < left_limit) continue;
 			if (near_header && STATUS_RE.test(t)) {
 				q.status = q.status || rstrip(t, ".");
@@ -208,9 +298,16 @@ class _QuestionParser {
 			const limit = nav ? item_key(nav) : null;
 			if (limit) imgs = imgs.filter((im) => keyLT(item_key(im), limit));
 		}
-		const [labels, inline_text] = _find_labels(body);
+		const [labels, inline_text, relaxed] = _find_labels(body);
 		let stem_items, fb_items;
-		if (labels.length) [stem_items, fb_items] = this._split_with_options(q, body, imgs, icons, marks, labels, inline_text);
+		// Em PDFs do Safari/PDFium o texto da alternativa fica alguns pontos acima da
+		// letra: a tolerância acompanha a altura da letra (o original usa 1,5 pt fixo).
+		let tol = 1.5;
+		if (!options.compat && labels.length) {
+			const hs = labels.map((l) => l.y1 - l.y0).sort((a, b) => a - b);
+			tol = Math.max(relaxed ? 3.0 : 1.5, 0.45 * hs[Math.floor(hs.length / 2)]);
+		}
+		if (labels.length) [stem_items, fb_items] = this._split_with_options(q, body, imgs, icons, marks, labels, inline_text, tol);
 		else [stem_items, fb_items] = this._split_without_options(body, imgs);
 		let gaps;
 		[q.stem, gaps] = this.builder.build(stem_items);
@@ -235,7 +332,7 @@ class _QuestionParser {
 		return q;
 	}
 
-	_split_with_options(q, body, imgs, icons, marks, labels, inline_text) {
+	_split_with_options(q, body, imgs, icons, marks, labels, inline_text, tol = 1.5) {
 		const label_ids = new Set(labels);
 		const first = labels[0], last = labels[labels.length - 1];
 		const label_x = first.x0;
@@ -246,14 +343,14 @@ class _QuestionParser {
 		let fb_start = null;
 		for (const ln of body) {
 			if (keyLE(item_key(ln), item_key(last)) || label_ids.has(ln)) continue;
-			if (ln.x0 < label_x - 2 || (this.fb_colors.has(ln.color) && ln.color !== opt_color && _row_index(labels, ln) === labels.length - 1 && ln.y0 > last.y1 + 4)) {
+			if (ln.x0 < label_x - 2 || (this.fb_colors.has(ln.color) && ln.color !== opt_color && _row_index(labels, ln, tol) === labels.length - 1 && ln.y0 > last.y1 + 4)) {
 				fb_start = item_key(ln);
 				break;
 			}
 		}
 		const in_options = (it) => {
 			const k = item_key(it);
-			return keyLE([first.page, first.y0], [it.page, it.y0 + 1.5]) && (fb_start === null || keyLT(k, fb_start));
+			return keyLE([first.page, first.y0], [it.page, it.y0 + tol]) && (fb_start === null || keyLT(k, fb_start));
 		};
 		const toFeedback = (it) => fb_start !== null && !keyLT(item_key(it), fb_start);
 		const opts = labels.map((lab) => new Option(strip(lab.text)[0].toLowerCase()));
@@ -262,7 +359,7 @@ class _QuestionParser {
 		const stem_items = [];
 		const fb_items = [];
 		const opt_icons = labels.map(() => []);
-		for (const ic of icons) if (in_options(ic)) opt_icons[_row_index(labels, ic)].push(ic);
+		for (const ic of icons) if (in_options(ic)) opt_icons[_row_index(labels, ic, tol)].push(ic);
 		for (const ln of body) {
 			if (label_ids.has(ln)) {
 				if (inline_text.has(ln)) opt_items[labels.indexOf(ln)].push(inline_text.get(ln));
@@ -272,8 +369,8 @@ class _QuestionParser {
 				(toFeedback(ln) ? fb_items : stem_items).push(ln);
 				continue;
 			}
-			const k = _row_index(labels, ln);
-			if (_QuestionParser._is_side(ln, k, opt_icons[k], text_x, body, labels)) side_items[k].push(ln);
+			const k = _row_index(labels, ln, tol);
+			if (_QuestionParser._is_side(ln, k, opt_icons[k], text_x, body, labels, tol)) side_items[k].push(ln);
 			else opt_items[k].push(ln);
 		}
 		for (const im of imgs) {
@@ -281,7 +378,7 @@ class _QuestionParser {
 				(toFeedback(im) ? fb_items : stem_items).push(im);
 				continue;
 			}
-			const k = _row_index(labels, im);
+			const k = _row_index(labels, im, tol);
 			(im.x0 > text_x + 40 && opt_icons[k].length ? side_items[k] : opt_items[k]).push(im);
 		}
 		opts.forEach((opt, k) => {
@@ -302,14 +399,14 @@ class _QuestionParser {
 		return [stem_items, fb_items];
 	}
 
-	static _is_side(ln, k, icons, text_x, body, labels) {
+	static _is_side(ln, k, icons, text_x, body, labels, tol = 1.5) {
 		for (const ic of icons) {
 			if (ic.page === ln.page && ln.x0 >= ic.x1 - 1 && ln.y0 >= ic.y0 - 4) return true;
 		}
 		if (ln.x0 > text_x + 40) {
 			for (const other of body) {
 				if (other === ln || other.page !== ln.page || Math.abs(other.x0 - text_x) > 3) continue;
-				if (_row_index(labels, other) === k && Math.min(other.y1, ln.y1) - Math.max(other.y0, ln.y0) > 1) return true;
+				if (_row_index(labels, other, tol) === k && Math.min(other.y1, ln.y1) - Math.max(other.y0, ln.y0) > 1) return true;
 			}
 		}
 		return false;
@@ -396,14 +493,58 @@ function _has_status_below(header, lines) {
 	return false;
 }
 
+// Se "Questão N" é a última linha da página, devolve o topo da página seguinte
+// (onde o Moodle continua com "Correto / Atingiu…"); senão, null.
+function _spills_to_next_page(header, lines) {
+	if (lines.some((o) => o !== header && o.page === header.page && o.y0 > header.y0 + 1)) return null;
+	const next = lines.filter((o) => o.page === header.page + 1);
+	return next.length ? Math.min(...next.map((o) => o.y0)) : null;
+}
+
+function _has_status_on_next_page(header, lines) {
+	const top = _spills_to_next_page(header, lines);
+	if (top === null) return false;
+	return lines.some((ln) => ln.page === header.page + 1 && ln.y0 - top < 60 && (STATUS_RE.test(strip(ln.text)) || GRADE_RE.test(strip(ln.text))));
+}
+
+// "Questão" sem número (o número caiu dentro de outro texto, em PDFs com trechos
+// sobrepostos) mas com "Atingiu…" logo abaixo: é a questão seguinte da sequência.
+function _recover_numberless_headers(headers, lines) {
+	const x0 = headers[0].x0;
+	const lone = lines.filter((ln) => /^(?:Questão|Questao|Question|Pergunta)$/iu.test(strip(ln.text)) &&
+		Math.abs(ln.x0 - x0) < 3 && _has_status_below(ln, lines));
+	if (!lone.length) return headers;
+	const all = [...headers, ...lone].sort((a, b) => cmpTuple(item_key(a), item_key(b)));
+	let prev = 0;
+	for (const h of all) {
+		if (lone.includes(h)) {
+			const s = h.spans[h.spans.length - 1];
+			const num = String(prev + 1);
+			const sp = /\s$/u.test(h.text) ? "" : " ";
+			h.spans.push(new Span(sp + num, s.bold, s.italic, s.size, s.color, s.x1, s.x1, s.origin_y, []));
+			h.recovered = true;
+		}
+		prev = parseInt(QUESTION_RE.exec(strip(h.text))[1], 10);
+	}
+	return all;
+}
+
 export function parse_moodle(content) {
 	const lines = content.all_lines();
 	if (!lines.length) return null;
 	const bsize = body_size(lines);
 	const candidates = lines.filter((ln) => QUESTION_RE.test(strip(ln.text)));
 	let headers = candidates.filter((ln) => ln.size >= bsize * 1.1);
-	if (!headers.length) headers = candidates.filter((h) => _has_status_below(h, lines));
+	if (!headers.length) {
+		headers = candidates.filter((h) => _has_status_below(h, lines));
+		if (headers.length && !options.compat) {
+			// títulos no pé da página, com o status no topo da próxima (Safari do iOS)
+			const x0 = headers[0].x0;
+			headers = candidates.filter((h) => headers.includes(h) || (Math.abs(h.x0 - x0) < 3 && _has_status_on_next_page(h, lines)));
+		}
+	}
 	if (!headers.length) return null;
+	if (!options.compat) headers = _recover_numberless_headers(headers, lines);
 	const fb_colors = new Set();
 	for (const ln of lines) {
 		const t = strip(ln.text);
