@@ -1,24 +1,27 @@
-# Provas Girlie ♡ (versão web)
+# Girlie Formater ♡
 
-Transforma os PDFs da **“Revisão da tentativa” do Moodle** em um caderno **.docx**
+Revisor, formatador e editor automático de **Cadernos de Questões com Gabaritos Comentados**.
+
+Transforma os PDFs da **“Revisão da tentativa” do Moodle** (e provas em PDF ou .docx) em um caderno **.docx**
 bonito e organizado — capa ilustrada, sumário com links, questões com as figuras
 originais e **gabarito comentado** — direto no navegador, inclusive no **Safari do iPad**.
 
 **Abrir o app:** https://pedroeleagua.github.io/provas-girlie/
 
-Tudo acontece no seu aparelho: os PDFs **não são enviados** para nenhum servidor.
+**Processado localmente:** tudo acontece no seu aparelho. Nenhum arquivo ou dado é enviado, armazenado ou retido pelo site.
 
-Criado por **[Pedro Guarilha](https://github.com/pedroeleagua)**.
+© 2026 **[Pedro Eleutério Alves Guarilha](https://github.com/pedroeleagua)** (pedroeleagua).
 
 ---
 
-## Como usar (iPad)
+## Como usar (iPad/iPhone)
 
 1. Abra o link acima no **Safari**.
-2. Toque em **＋ Adicionar provas** e escolha os PDFs (em geral ficam em *Arquivos › Downloads*).
+2. Toque em **＋ Adicionar provas** e escolha os PDFs ou arquivos .docx, **na ordem em que vão aparecer no Caderno de Questões** (no iOS, em geral ficam em *Arquivos › Downloads*).
 3. Use **▲ / ▼** para deixar as provas na ordem desejada.
 4. Confira o **Nome no cabeçalho**. Título e subtítulo da capa são automáticos, mas dá para escrever outros.
-5. Toque em **✦ Gerar meu caderno .docx** e depois em **Abrir no Word / Compartilhar**
+5. Em **Informe o nome que o arquivo terá**, dê um nome ao caderno.
+6. Toque em **✦ Gerar meu caderno .docx** e depois em **Abrir no Word / Compartilhar**
    (ou **Baixar .docx**).
 
 Dica: no Safari, *Compartilhar › Adicionar à Tela de Início* cria um ícone do app.
@@ -80,5 +83,12 @@ Ao publicar uma versão nova, mude `CACHE` em `sw.js` para os aparelhos baixarem
 
 ## Licença
 
-© Pedro Guarilha. Distribuído sob a **GNU AGPL-3.0** (veja `LICENSE`), a mesma licença do
-MuPDF, do qual este app depende. Componentes de terceiros estão listados em `NOTICE.md`.
+© 2026 Pedro Eleutério Alves Guarilha ([pedroeleagua](https://github.com/pedroeleagua)).
+O código deste repositório é distribuído sob a **Licença MIT com cláusula de crédito**
+(veja `LICENSE`): pode usar, copiar, modificar e redistribuir, inclusive em forks e sites,
+desde que mantenha o aviso de copyright e **dê crédito visível ao autor original** com link
+para este repositório.
+
+Os componentes de terceiros mantêm as próprias licenças (veja `NOTICE.md`). Em especial,
+o leitor de PDF **MuPDF** (`vendor/mupdf/`) é **GNU AGPL-3.0**: quem publicar uma cópia
+do site com esses arquivos também precisa cumprir a AGPL, oferecendo o código-fonte completo.

@@ -3,7 +3,7 @@
 	"version": "1.0.2",
 	"private": true,
 	"type": "module",
-	"description": "Provas Girlie no navegador: revisões do Moodle (PDF) viram um caderno .docx.",
+	"description": "Girlie Formater: revisões do Moodle (PDF) viram um caderno .docx.",
 	"scripts": {
 		"test": "node tests/run.mjs",
 		"build:template": "node tools/make_template.mjs",
@@ -15,8 +15,8 @@
 		"jszip": "3.10.2",
 		"mupdf": "1.28.1"
 	},
-	"author": "Pedro Guarilha (https://github.com/pedroeleagua)",
-	"license": "AGPL-3.0-or-later",
+	"author": "Pedro Eleutério Alves Guarilha (https://github.com/pedroeleagua)",
+	"license": "SEE LICENSE IN LICENSE",
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/pedroeleagua/provas-girlie.git"
